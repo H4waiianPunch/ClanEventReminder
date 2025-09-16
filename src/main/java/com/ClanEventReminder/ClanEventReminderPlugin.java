@@ -18,6 +18,7 @@ import okhttp3.Response;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 
+import java.awt.*;
 import java.io.IOException;
 
 @Slf4j
@@ -84,7 +85,6 @@ public class ClanEventReminderPlugin extends Plugin
 					JsonParser parser = new JsonParser();
 					JsonObject json = parser.parse(cachedMessage).getAsJsonObject();
 
-
 					for (int i = 1; i <= 3; i++)
 					{
 						String key = "Event" + i;
@@ -93,9 +93,20 @@ public class ClanEventReminderPlugin extends Plugin
 							String eventMessage = json.get(key).getAsString();
 							if (!eventMessage.isEmpty())
 							{
-								// Broadcast above chat in blue
-								String blueMessage = "<col=0000ff>" + eventMessage + "</col>";
-								client.addChatMessage(ChatMessageType.GAMEMESSAGE, "Clan Event", blueMessage, null);
+								// Apply user-selected color if available, otherwise use game default
+								Color chatColor = config.chatboxColor();
+								if (chatColor != null)
+								{
+									String hexColor = String.format("%06x", chatColor.getRGB() & 0xFFFFFF);
+									eventMessage = "<col=" + hexColor + ">" + eventMessage + "</col>";
+								}
+
+								client.addChatMessage(
+										ChatMessageType.GAMEMESSAGE,
+										"Clan Event",
+										eventMessage,
+										null
+								);
 							}
 						}
 					}
@@ -107,6 +118,7 @@ public class ClanEventReminderPlugin extends Plugin
 			}
 		}
 	}
+
 
 
 

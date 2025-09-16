@@ -4,6 +4,8 @@ import net.runelite.client.config.Config;
 import net.runelite.client.config.ConfigGroup;
 import net.runelite.client.config.ConfigItem;
 
+import java.awt.*;
+
 @ConfigGroup("claneventreminder")
 public interface ClanEventReminderConfig extends Config
 {
@@ -25,5 +27,15 @@ public interface ClanEventReminderConfig extends Config
 	default boolean showOverlay()
 	{
 		return true;
+	}
+
+	@ConfigItem(
+			keyName = "chatboxColor",
+			name = "Chatbox text colour",
+			description = "Changes the color of the reminder text in the chatbox."
+	)
+	default Color chatboxColor()
+	{
+		return null;
 	}
 }
