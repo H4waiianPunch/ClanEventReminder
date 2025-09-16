@@ -1,30 +1,32 @@
 package com.ClanEventReminder;
 
 import com.google.inject.Provides;
-import javax.inject.Inject;
+import com.google.gson.JsonObject;
+import com.google.gson.JsonParser;
 import lombok.extern.slf4j.Slf4j;
-import net.runelite.api.ChatMessageType;
 import net.runelite.api.Client;
 import net.runelite.api.GameState;
 import net.runelite.api.events.GameStateChanged;
+import net.runelite.api.events.GameTick;
+import net.runelite.api.ChatMessageType;
 import net.runelite.client.config.ConfigManager;
 import net.runelite.client.eventbus.Subscribe;
 import net.runelite.client.plugins.Plugin;
 import net.runelite.client.plugins.PluginDescriptor;
 import net.runelite.client.ui.overlay.OverlayManager;
-import okhttp3.OkHttpClient;
-import okhttp3.Request;
-import okhttp3.Response;
-import com.google.gson.JsonObject;
-import com.google.gson.JsonParser;
 
+import javax.inject.Inject;
+import java.io.InputStreamReader;
+import java.net.URL;
+import java.time.Duration;
+import java.time.Instant;
+import java.util.Optional;
 import java.awt.*;
-import java.io.IOException;
 
 @Slf4j
 @PluginDescriptor(
 		name = "Clan Event Reminder",
-		description = "Displays clan event reminders from a GitHub JSON file",
+		description = "Displays reminders for clan events from GitHub URL",
 		tags = {"clan", "event", "reminder"}
 )
 public class ClanEventReminderPlugin extends Plugin
@@ -41,13 +43,20 @@ public class ClanEventReminderPlugin extends Plugin
 	@Inject
 	private ClanEventReminderOverlay overlay;
 
-	private final OkHttpClient httpClient = new OkHttpClient();
-	private String cachedMessage = null;
+	private String cachedMessage;
+
+	private Instant loginInstant;
+	private Optional<Instant> lastReminderInstant = Optional.empty();
+
+	@Provides
+	ClanEventReminderConfig provideConfig(ConfigManager configManager)
+	{
+		return configManager.getConfig(ClanEventReminderConfig.class);
+	}
 
 	@Override
 	protected void startUp() throws Exception
 	{
-		log.info("Clan Event Reminder started!");
 		overlayManager.add(overlay);
 
 		// If the client is already logged in when plugin starts, fetch the message immediately
@@ -61,9 +70,9 @@ public class ClanEventReminderPlugin extends Plugin
 	@Override
 	protected void shutDown() throws Exception
 	{
-		log.info("Clan Event Reminder stopped!");
 		overlayManager.remove(overlay);
 		cachedMessage = null;
+		lastReminderInstant = Optional.empty();
 	}
 
 	@Subscribe
@@ -71,98 +80,116 @@ public class ClanEventReminderPlugin extends Plugin
 	{
 		if (gameStateChanged.getGameState() == GameState.LOGGED_IN)
 		{
-			// Fetch reminder if we don’t have it yet
+			loginInstant = Instant.now();
+			lastReminderInstant = Optional.empty();
+
 			if (cachedMessage == null)
 			{
 				fetchReminder();
 			}
 
-			// If we have JSON data, parse up to 3 events
 			if (cachedMessage != null && !cachedMessage.isEmpty())
 			{
-				try
-				{
-					JsonParser parser = new JsonParser();
-					JsonObject json = parser.parse(cachedMessage).getAsJsonObject();
-
-					for (int i = 1; i <= 3; i++)
-					{
-						String key = "Event" + i;
-						if (json.has(key) && !json.get(key).isJsonNull())
-						{
-							String eventMessage = json.get(key).getAsString();
-							if (!eventMessage.isEmpty())
-							{
-								// Apply user-selected color if available, otherwise use game default
-								Color chatColor = config.chatboxColor();
-								if (chatColor != null)
-								{
-									String hexColor = String.format("%06x", chatColor.getRGB() & 0xFFFFFF);
-									eventMessage = "<col=" + hexColor + ">" + eventMessage + "</col>";
-								}
-
-								client.addChatMessage(
-										ChatMessageType.GAMEMESSAGE,
-										"Clan Event",
-										eventMessage,
-										null
-								);
-							}
-						}
-					}
-				}
-				catch (Exception e)
-				{
-					log.error("Failed to parse events from JSON", e);
-				}
+				broadcastEvents();
+				resetReminderInterval();
 			}
 		}
 	}
 
-
-
-
-	private void fetchReminder()
+	@Subscribe
+	public void onGameTick(GameTick tick)
 	{
-		String url = config.reminderUrl();
-		if (url == null || url.isEmpty())
+		if (!config.reminderIntervalEnabled() || cachedMessage == null)
 		{
-			log.warn("No reminder URL set in config");
 			return;
 		}
 
-		Request request = new Request.Builder()
-				.url(url)
-				.build();
-
-		try (Response response = httpClient.newCall(request).execute())
+		final Instant nextReminder = getNextReminderInstant();
+		if (nextReminder.compareTo(Instant.now()) < 0)
 		{
-			if (!response.isSuccessful())
-			{
-				log.error("Failed to fetch reminder: {}", response);
-				return;
-			}
-
-			// Store the JSON as a string; parsing happens later
-			cachedMessage = response.body().string();
-			log.info("Fetched reminder JSON: {}", cachedMessage);
-		}
-		catch (IOException e)
-		{
-			log.error("Error fetching reminder", e);
+			broadcastEvents();
+			resetReminderInterval();
 		}
 	}
 
+	private void fetchReminder()
+	{
+		try
+		{
+			String url = config.reminderUrl();
+			if (url == null || url.isEmpty())
+			{
+				return;
+			}
 
+			URL githubUrl = new URL(url);
+			try (InputStreamReader reader = new InputStreamReader(githubUrl.openStream()))
+			{
+				cachedMessage = new JsonParser().parse(reader).toString();
+				log.info("Fetched reminder JSON: {}", cachedMessage);
+			}
+		}
+		catch (Exception e)
+		{
+			log.error("Failed to fetch reminder from GitHub", e);
+		}
+	}
+
+	private void broadcastEvents()
+	{
+		try
+		{
+			JsonObject json = new JsonParser().parse(cachedMessage).getAsJsonObject();
+
+			for (int i = 1; i <= 3; i++)
+			{
+				String key = "Event" + i;
+				if (json.has(key) && !json.get(key).isJsonNull())
+				{
+					String eventMessage = json.get(key).getAsString();
+					if (!eventMessage.isEmpty())
+					{
+						// Apply configurable chatbox color
+						String formattedMessage;
+						Color c = config.chatboxColor();
+						if (c != null)
+						{
+							String hex = String.format("%06x", c.getRGB() & 0xFFFFFF);
+							formattedMessage = "<col=" + hex + ">" + eventMessage + "</col>";
+						}
+						else
+						{
+							formattedMessage = eventMessage; // default game color
+						}
+
+						client.addChatMessage(ChatMessageType.GAMEMESSAGE, "Clan Event", formattedMessage, null);
+					}
+				}
+			}
+		}
+		catch (Exception e)
+		{
+			log.error("Failed to parse events from JSON", e);
+		}
+	}
+
+	private Instant getNextReminderInstant()
+	{
+		final Duration reminderDuration = Duration.ofMinutes(config.reminderIntervalMinutes());
+		if (lastReminderInstant.isPresent())
+		{
+			return lastReminderInstant.get().plus(reminderDuration);
+		}
+		return loginInstant.plus(reminderDuration);
+	}
+
+	private void resetReminderInterval()
+	{
+		lastReminderInstant = Optional.of(Instant.now());
+	}
 
 	public String getCachedMessage()
 	{
 		return cachedMessage;
-	}
-
-	@Provides
-	ClanEventReminderConfig provideConfig(ConfigManager configManager)
-	{
-		return configManager.getConfig(ClanEventReminderConfig.class);
 	}
 }
